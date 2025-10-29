@@ -1,0 +1,18 @@
+# Clean RAG System Requirements
+
+# Core dependencies
+fastapi==0.109.0
+uvicorn==0.27.0
+pydantic==2.5.0
+python-dotenv==1.0.0
+
+# Retrieval
+faiss-cpu==1.7.4
+rank-bm25==0.2.2
+sentence-transformers==2.3.1
+
+# Generation
+openai==1.10.0
+
+# Utilities
+numpy==1.24.3
