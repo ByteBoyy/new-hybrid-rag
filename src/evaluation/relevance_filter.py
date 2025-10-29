@@ -1,25 +1,20 @@
-# src/evaluation/relevance_filter.py
-"""
-Lightweight relevance filtering.
-Much faster than the old 9-dimensional evaluation.
 
-Only checks 2 things:
-1. Keyword overlap (is the query in the document?)
-2. Content quality (is the document substantial?)
-"""
 from typing import List, Dict
 import re
 
 
 class RelevanceFilter:
     """
-    Simple 2-check relevance filter.
+    Simple relevance filter that works when summaries are empty.
     
-    Old system: 9 dimensions, 2-3 seconds
-    New system: 2 checks, 50ms
+    Scoring:
+    1. Keyword overlap in title + text (40%)
+    2. Semantic similarity score from retriever (60%)
+    
+    Trusts the semantic model more since summaries are unavailable.
     """
     
-    def __init__(self, min_score: float = 0.2):
+    def __init__(self, min_score: float = 0.3):
         """
         Initialize filter.
         
@@ -33,7 +28,7 @@ class RelevanceFilter:
             'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for',
             'from', 'has', 'he', 'in', 'is', 'it', 'its', 'of', 'on',
             'that', 'the', 'to', 'was', 'will', 'with',
-            'what', 'who', 'when', 'where', 'why', 'how'
+            'what', 'who', 'when', 'where', 'why', 'how', 'does', 'do'
         }
     
     def filter_results(self, query: str, results: List[Dict]) -> List[Dict]:
@@ -65,8 +60,8 @@ class RelevanceFilter:
         # Sort by combined score (retrieval + relevance)
         for doc in filtered:
             doc['final_score'] = (
-                0.6 * doc['score'] +          # Retrieval score
-                0.4 * doc['relevance_score']  # Relevance score
+                0.5 * doc['score'] +          # Retrieval score (semantic + reranking)
+                0.5 * doc['relevance_score']  # Relevance score
             )
         
         filtered.sort(key=lambda x: x['final_score'], reverse=True)
@@ -79,23 +74,25 @@ class RelevanceFilter:
         """
         Calculate relevance score (0-1).
         
-        Two simple checks:
-        1. Keyword overlap (0.6 weight)
-        2. Content quality (0.4 weight)
+        Two components:
+        1. Keyword overlap (40% weight)
+        2. Semantic similarity from retriever (60% weight)
+        
+        Trusts semantic model more since 95% of docs have no summary.
         """
-        # Check 1: Keyword overlap
+        # Get semantic score from retriever (already 0-1)
+        semantic_score = doc.get('score', 0.5)
+        
+        # Calculate keyword overlap
         keyword_score = self._keyword_overlap(query, doc)
         
-        # Check 2: Content quality
-        quality_score = self._content_quality(doc)
-        
-        # Combined score
-        return 0.6 * keyword_score + 0.4 * quality_score
+        # Weighted combination (trust semantic model more)
+        return 0.4 * keyword_score + 0.6 * semantic_score
     
     def _keyword_overlap(self, query: str, doc: Dict) -> float:
         """
-        Check if query terms appear in document.
-        Simple but effective.
+        Check if query terms appear in title and text.
+        Ignores summaries since 95% are empty.
         """
         # Extract query terms (remove stop words)
         query_terms = set(
@@ -107,48 +104,19 @@ class RelevanceFilter:
         if not query_terms:
             return 0.5  # Neutral if no valid terms
         
-        # Check in title (highest weight)
+        # Check in title (very high weight - titles are usually relevant)
         title = doc.get('title', '').lower()
         title_matches = sum(1 for term in query_terms if term in title)
-        title_score = (title_matches / len(query_terms)) * 0.5
+        title_ratio = title_matches / len(query_terms)
         
-        # Check in summary (medium weight)
-        summary = doc.get('summary', '').lower()
-        summary_matches = sum(1 for term in query_terms if term in summary)
-        summary_score = (summary_matches / len(query_terms)) * 0.3
-        
-        # Check in text preview (lower weight)
-        text = doc.get('text', '')[:500].lower()
+        # Check in text (use more text since no summaries available)
+        text = doc.get('text', '')[:2000].lower()  # First 2000 chars
         text_matches = sum(1 for term in query_terms if term in text)
-        text_score = (text_matches / len(query_terms)) * 0.2
+        text_ratio = text_matches / len(query_terms)
         
-        return min(title_score + summary_score + text_score, 1.0)
-    
-    def _content_quality(self, doc: Dict) -> float:
-        """
-        Check if document has substantial content.
-        """
-        text = doc.get('text', '')
-        summary = doc.get('summary', '')
-        
-        text_len = len(text)
-        summary_len = len(summary)
-        
-        score = 0.5  # Base score
-        
-        # Good text length (500-10000 chars)
-        if 500 <= text_len <= 10000:
-            score += 0.3
-        elif 200 <= text_len < 500:
-            score += 0.2
-        elif text_len > 10000:
-            score += 0.2
-        
-        # Has summary
-        if summary_len > 100:
-            score += 0.2
-        elif summary_len > 50:
-            score += 0.1
+        # Combined score
+        # Title match is worth more (0.6) than text match (0.4)
+        score = 0.6 * title_ratio + 0.4 * text_ratio
         
         return min(score, 1.0)
     
@@ -168,7 +136,7 @@ class RelevanceFilter:
 
 _FILTER = None
 
-def get_relevance_filter(min_score: float = 0.2) -> RelevanceFilter:
+def get_relevance_filter(min_score: float = 0.3) -> RelevanceFilter:
     """Get cached filter instance."""
     global _FILTER
     

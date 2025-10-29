@@ -1,6 +1,6 @@
 # src/retrieval/semantic_retriever.py
 """
-Semantic retriever using FAISS.
+Semantic retriever using FAISS with reranking.
 Supports both standard (768D) and ultra-compressed (192D) modes.
 """
 import faiss
@@ -9,16 +9,17 @@ import bz2
 import lzma
 import zlib
 import numpy as np
+import re
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
 from typing import List, Dict
 
-from src.config import get_config, EMBEDDING_MODEL
+from src.config import get_config, EMBEDDING_MODEL, ENABLE_RERANKING
 
 
 class SemanticRetriever:
     """
-    Fast semantic retriever with dual-mode support.
+    Fast semantic retriever with dual-mode support and reranking.
     
     Modes:
         - standard: Full 768D embeddings (2.2 GB, 100% quality)
@@ -99,17 +100,33 @@ class SemanticRetriever:
             
             print(f"  Metadata: {len(self.docs):,} documents")
     
-    def retrieve(self, query: str, top_k: int = 10) -> List[Dict]:
+    def retrieve(self, query: str, top_k: int = 10, retrieve_k: int = None, enable_reranking: bool = None) -> List[Dict]:
         """
-        Retrieve documents using semantic search.
+        Retrieve documents using semantic search with optional reranking.
+        
+        Two-stage approach:
+        1. Retrieve more candidates (retrieve_k)
+        2. Rerank with multiple signals and return top_k
         
         Args:
             query: Search query
             top_k: Number of results to return
+            retrieve_k: Number to retrieve initially (default: top_k * 5)
+            enable_reranking: Use multi-signal reranking (default: from config)
         
         Returns:
             List of documents with text, summary, metadata
         """
+        # Use config default if not specified
+        if enable_reranking is None:
+            enable_reranking = ENABLE_RERANKING
+        
+        # Retrieve more candidates for reranking
+        retrieve_k = retrieve_k or (top_k * 5)
+        
+        if enable_reranking:
+            print(f"  📥 Retrieving {retrieve_k} candidates for reranking...")
+        
         # Encode query
         qvec = self.embedder.encode(
             [query], 
@@ -122,7 +139,7 @@ class SemanticRetriever:
             qvec = self._apply_pca(qvec)
         
         # Search
-        D, I = self.index.search(qvec, top_k)
+        D, I = self.index.search(qvec, retrieve_k)
         
         # Build results
         results = []
@@ -133,10 +150,170 @@ class SemanticRetriever:
             doc = self._get_document(idx)
             
             if doc:
-                doc['score'] = float(score)
+                doc['semantic_score'] = float(score)  # Keep original semantic score
+                doc['score'] = float(score)  # Initial score (will be updated by reranking)
                 results.append(doc)
         
+        # Stage 2: Rerank if enabled
+        if enable_reranking and results:
+            print(f"  🎯 Reranking with title + TF + quality signals...")
+            results = self._rerank_results(query, results)
+        
+        # Return top_k
+        print(f"  ✅ Returning top {min(top_k, len(results))} results")
+        return results[:top_k]
+    
+    def _rerank_results(self, query: str, results: List[Dict]) -> List[Dict]:
+        """
+        Rerank results with multiple signals:
+        1. Title term matching (strongest - 35% max boost)
+        2. Term frequency in text (15% max boost)
+        3. Document quality (8% max boost)
+        
+        This significantly improves relevance compared to semantic similarity alone.
+        """
+        # Extract meaningful query terms
+        query_terms = self._extract_query_terms(query)
+        
+        if not query_terms:
+            return results  # No reranking possible
+        
+        for doc in results:
+            semantic_score = doc['semantic_score']
+            
+            # Signal 1: Title term presence (STRONGEST)
+            title_boost = self._calculate_title_boost(query_terms, doc['title'])
+            
+            # Signal 2: Term frequency in text
+            tf_boost = self._calculate_tf_boost(query_terms, doc['text'])
+            
+            # Signal 3: Document quality
+            quality_boost = self._calculate_quality_boost(doc['text'])
+            
+            # Combine signals
+            doc['score'] = semantic_score + title_boost + tf_boost + quality_boost
+            
+            # Store components for debugging (optional)
+            doc['_rerank_components'] = {
+                'semantic': semantic_score,
+                'title': title_boost,
+                'tf': tf_boost,
+                'quality': quality_boost
+            }
+        
+        # Sort by new score
+        results.sort(key=lambda x: x['score'], reverse=True)
         return results
+    
+    def _extract_query_terms(self, query: str) -> set:
+        """
+        Extract meaningful terms from query.
+        Removes stop words and short terms.
+        """
+        stop_words = {
+            'what', 'is', 'the', 'a', 'an', 'how', 'does', 'do', 'in', 
+            'of', 'to', 'for', 'are', 'was', 'were', 'been', 'be',
+            'have', 'has', 'had', 'with', 'by', 'from', 'about', 'at'
+        }
+        
+        terms = set(
+            term.lower() 
+            for term in re.findall(r'\b\w+\b', query)
+            if term.lower() not in stop_words and len(term) >= 3
+        )
+        
+        return terms
+    
+    def _calculate_title_boost(self, query_terms: set, title: str) -> float:
+        """
+        Calculate boost from title matching.
+        
+        Title is the STRONGEST signal - if query terms appear in title,
+        the document is almost always relevant.
+        
+        Returns: 0 to 0.35 boost
+        """
+        if not title:
+            return 0
+        
+        title_lower = title.lower()
+        title_words = set(re.findall(r'\b\w+\b', title_lower))
+        
+        # Count exact matches
+        exact_matches = len(query_terms & title_words)
+        
+        # Check for partial/stem matches
+        # e.g., "technology" in query, "technologies" in title
+        partial_matches = 0
+        for qterm in query_terms:
+            if qterm not in title_words:
+                # Check substring matches (stem matching)
+                if any(qterm in tword or tword in qterm for tword in title_words if len(qterm) > 3):
+                    partial_matches += 1
+        
+        # Calculate match ratio
+        total_matches = exact_matches + (partial_matches * 0.5)
+        match_ratio = total_matches / len(query_terms) if query_terms else 0
+        
+        # Aggressive boosting for title matches
+        if match_ratio >= 0.8:
+            return 0.35  # Almost all terms in title!
+        elif match_ratio >= 0.6:
+            return 0.25  # Most terms in title
+        elif match_ratio >= 0.4:
+            return 0.15  # Several terms in title
+        elif match_ratio > 0:
+            return 0.08  # At least one term in title
+        else:
+            return 0
+    
+    def _calculate_tf_boost(self, query_terms: set, text: str) -> float:
+        """
+        Calculate boost from term frequency.
+        
+        Counts how often query terms appear in the early part of the text
+        (first 1500 chars where key info usually appears).
+        
+        Returns: 0 to 0.15 boost
+        """
+        if not text:
+            return 0
+        
+        # Focus on early text (most important info is usually there)
+        text_early = text[:1500].lower()
+        
+        # Count occurrences with word boundaries
+        total_occurrences = 0
+        for term in query_terms:
+            count = len(re.findall(r'\b' + re.escape(term) + r'\b', text_early))
+            total_occurrences += count
+        
+        # Normalize: 
+        # - 1 occurrence per term = decent (score ~0.05)
+        # - 3+ occurrences per term = excellent (score ~0.15)
+        # Cap to prevent keyword stuffing bias
+        normalized_score = min(total_occurrences / (len(query_terms) * 10), 0.15)
+        
+        return normalized_score
+    
+    def _calculate_quality_boost(self, text: str) -> float:
+        """
+        Calculate boost from document quality (based on length).
+        
+        Well-developed articles are usually 1000-10000 characters.
+        
+        Returns: 0 to 0.08 boost
+        """
+        length = len(text)
+        
+        if 1000 <= length <= 10000:
+            return 0.08  # Sweet spot - well-developed article
+        elif 500 <= length < 1000:
+            return 0.04  # Decent article
+        elif length > 10000:
+            return 0.05  # Comprehensive but might be too broad
+        else:
+            return 0  # Too short (stub article)
     
     def _apply_pca(self, embedding: np.ndarray) -> np.ndarray:
         """Apply PCA transformation for ultra mode."""
@@ -197,21 +374,10 @@ class SemanticRetriever:
         }
     
     def _decompress_text(self, data, method):
-        # """Decompress text based on compression method."""
+        """Decompress text based on compression method."""
         if not data or not isinstance(data, bytes):
             return data if isinstance(data, str) else ''
         
-        # try:
-        #     if method == 1:  # zlib
-        #         return zlib.decompress(data).decode('utf-8')
-        #     elif method == 2:  # LZMA
-        #         return lzma.decompress(data).decode('utf-8')
-        #     else:
-        #         # Auto-detect
-        #         try:
-        #             return zlib.decompress(data).decode('utf-8')
-        #         except:
-        #             return lzma.decompress(data).decode('utf-8')
         try:
             return lzma.decompress(data).decode('utf-8')
         except Exception as e:
@@ -225,7 +391,8 @@ class SemanticRetriever:
             'total_vectors': self.index.ntotal,
             'total_documents': len(self.docs),
             'dimensions': self.pca_model['n_components'] if self.pca_model else 768,
-            'compressed': self.mode == 'ultra'
+            'compressed': self.mode == 'ultra',
+            'reranking_enabled': ENABLE_RERANKING
         }
 
 

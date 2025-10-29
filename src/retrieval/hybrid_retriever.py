@@ -1,7 +1,9 @@
 # src/retrieval/hybrid_retriever.py
 """
 Simple hybrid retriever: semantic-first with optional lexical boost.
+Auto-detects when to use BM25 for proper nouns and technical terms.
 """
+import re
 from typing import List, Dict
 from collections import defaultdict
 
@@ -12,9 +14,10 @@ from src.config import get_retrieval_config
 
 class HybridRetriever:
     """
-    Clean hybrid retrieval:
+    Clean hybrid retrieval with auto-detection:
     - Primary: Semantic search (FAISS)
-    - Optional: Lexical boost (BM25) for keyword-heavy queries
+    - Auto-detect: Use BM25 for proper nouns, acronyms, technical terms
+    - Optional: Manual BM25 boost for keyword-heavy queries
     
     Much simpler than before - no complex RRF, just score fusion.
     """
@@ -34,35 +37,41 @@ class HybridRetriever:
         self.lexical = None  # Lazy load (only if needed)
         
         print(f"Hybrid Retriever initialized in {mode.upper()} mode")
+        print(f"  Auto-detection: Enabled (proper nouns, acronyms, numbers)")
     
     def retrieve(
         self, 
         query: str, 
         top_k: int = None,
-        use_lexical: bool = False
+        use_lexical: bool = None
     ) -> List[Dict]:
         """
-        Retrieve documents.
+        Retrieve documents with optional auto-detection of BM25 usage.
         
         Args:
             query: Search query
             top_k: Number of results (default from config)
-            use_lexical: Add BM25 boost (slower but better for keywords)
+            use_lexical: Add BM25 boost (None = auto-detect, True = force, False = disable)
         
         Returns:
             List of documents sorted by relevance
         """
         top_k = top_k or self.cfg['top_k']
         
+        # AUTO-DETECT if not specified
+        if use_lexical is None:
+            use_lexical = self._should_use_bm25(query)
+            if use_lexical:
+                print(f"  🎯 Auto-enabled BM25 (detected: proper nouns/technical terms)")
+        
         if not use_lexical:
             # Fast path: semantic only
             print(f"🔍 Semantic search only (fast)")
             results = self.semantic.retrieve(query, top_k)
-            print(results)
             return self._normalize_scores(results)
         
         # Hybrid: semantic + lexical
-        print(f"🔍 Hybrid search: semantic + lexical boost")
+        print(f"🔍 Hybrid search: semantic + BM25 boost")
         
         # Semantic results
         sem_results = self.semantic.retrieve(query, top_k)
@@ -77,6 +86,43 @@ class HybridRetriever:
         combined = self._fuse_results(sem_results, lex_results, top_k)
         
         return combined
+    
+    def _should_use_bm25(self, query: str) -> bool:
+        """
+        Auto-detect if query would benefit from BM25 boost.
+        
+        Triggers for:
+        - Proper nouns (capitalized words)
+        - Acronyms (2+ consecutive capitals)
+        - Numbers/versions
+        - Technical long words (>10 chars)
+        
+        Returns:
+            True if BM25 should be used
+        """
+        # Check for proper nouns (capitalized words after first word)
+        # Example: "EF Johnson Technologies", "Barack Obama"
+        words = query.split()
+        capital_words = sum(1 for w in words[1:] if w and w[0].isupper())
+        if capital_words >= 1:
+            return True
+        
+        # Check for acronyms (2+ consecutive capitals)
+        # Example: "NASA", "IBM", "HTTP", "COVID-19"
+        if re.search(r'\b[A-Z]{2,}\b', query):
+            return True
+        
+        # Check for numbers/versions
+        # Example: "Python 3.9", "iPhone 15", "COVID-19"
+        if re.search(r'\b\d+', query):
+            return True
+        
+        # Check for technical terms (long words often technical)
+        # Example: "photosynthesis", "semiconductor"
+        if any(len(w) > 10 for w in words):
+            return True
+        
+        return False
     
     def _fuse_results(
         self, 
@@ -129,7 +175,7 @@ class HybridRetriever:
         # Sort and return top_k
         combined.sort(key=lambda x: x['score'], reverse=True)
         
-        print(f"  Combined {len(combined)} unique documents")
+        print(f"  ✅ Combined {len(combined)} unique documents")
         
         return combined[:top_k]
     
@@ -156,7 +202,8 @@ class HybridRetriever:
         return {
             'mode': self.mode,
             'semantic_stats': self.semantic.get_stats(),
-            'lexical_loaded': self.lexical is not None
+            'lexical_loaded': self.lexical is not None,
+            'auto_bm25_detection': True
         }
 
 
