@@ -40,29 +40,41 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # Default mode ('standard' or 'ultra')
 DEFAULT_MODE = os.getenv("RAG_MODE", "ultra")
 
-# Number of results to retrieve
-TOP_K = 10  # Retrieve more, return best 5 after filtering
+# Number of results to retrieve (INCREASED for better quality)
+TOP_K = 50  # Retrieve more candidates (was 10)
 
 # Final results to return
-FINAL_K = 5
+FINAL_K = 5  # Return best 5 after filtering
 
 # Semantic search settings
 SEMANTIC_WEIGHT = 1.0  # Primary method
 
 # Optional lexical boost (only when use_lexical=True)
 LEXICAL_WEIGHT = 0.3   # Light boost for keyword matches
-LEXICAL_TOP_K = 20     # How many BM25 results to consider
+LEXICAL_TOP_K = 30     # How many BM25 results to consider (increased)
 
 # Ultra-compressed settings
 ULTRA_NPROBE = 20  # Higher = better quality, slower (10-50)
+
+# ============================================================================
+# RERANKING SETTINGS (NEW!)
+# ============================================================================
+
+# Enable reranking for better results
+ENABLE_RERANKING = True
+
+# Reranking boost limits
+RERANK_TITLE_BOOST_MAX = 0.35    # Title match is strongest signal
+RERANK_TF_BOOST_MAX = 0.15       # Term frequency boost
+RERANK_QUALITY_BOOST_MAX = 0.08  # Document quality boost
 
 # ============================================================================
 # EVALUATION SETTINGS
 # ============================================================================
 
 # Lightweight relevance filtering
-MIN_RELEVANCE_SCORE = 0.2  # Lower threshold (we do less evaluation)
-USE_RELEVANCE_FILTER = True  # Quick relevance check
+MIN_RELEVANCE_SCORE = 0.3  # Raised from 0.2 (since 95% have no summaries)
+USE_RELEVANCE_FILTER = True
 
 # ============================================================================
 # GENERATION SETTINGS
@@ -116,7 +128,11 @@ def get_retrieval_config() -> dict:
         'lexical_weight': LEXICAL_WEIGHT,
         'lexical_top_k': LEXICAL_TOP_K,
         'min_relevance': MIN_RELEVANCE_SCORE,
-        'use_filter': USE_RELEVANCE_FILTER
+        'use_filter': USE_RELEVANCE_FILTER,
+        'enable_reranking': ENABLE_RERANKING,
+        'rerank_title_max': RERANK_TITLE_BOOST_MAX,
+        'rerank_tf_max': RERANK_TF_BOOST_MAX,
+        'rerank_quality_max': RERANK_QUALITY_BOOST_MAX
     }
 
 
