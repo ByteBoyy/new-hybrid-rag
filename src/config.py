@@ -16,7 +16,7 @@ STANDARD_INDEX = DATA_DIR / "wikipedia.index"
 STANDARD_METADATA = DATA_DIR / "wikipedia.pkl"
 
 # Ultra-compressed mode (50% smaller, 1.1 GB)
-ULTRA_DIR = Path("/workspace/ultra_compressed_full")
+ULTRA_DIR = Path("./ultra_compressed_full")
 ULTRA_INDEX = ULTRA_DIR / "wikipedia_ultra.index"
 ULTRA_METADATA = ULTRA_DIR / "metadata_ultra_compressed.pkl"
 # ULTRA_METADATA = ULTRA_DIR / "metadata_ultra_enhanced.pkl"
