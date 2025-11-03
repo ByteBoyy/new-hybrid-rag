@@ -80,6 +80,7 @@ class SemanticRetriever:
                 data = pickle.load(f)
             
             self.docs = data['d']  # Documents
+            print(self.docs[:10])
             self.title_dict = data.get('td', [])
             self.url_dict = data.get('ud', [])
             
