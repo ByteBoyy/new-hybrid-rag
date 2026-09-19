@@ -3,10 +3,9 @@
 Simple hybrid retriever: semantic-first with optional lexical boost.
 """
 from typing import List, Dict
+from copy import deepcopy
 from collections import defaultdict
 
-from src.retrieval.semantic_retriever import get_retriever as get_semantic
-from src.retrieval.lexical_retriever import get_lexical_retriever
 from src.config import get_retrieval_config
 
 
@@ -30,6 +29,7 @@ class HybridRetriever:
         self.cfg = get_retrieval_config()
         
         # Get retrievers (cached)
+        from src.retrieval.semantic_retriever import get_retriever as get_semantic
         self.semantic = get_semantic(mode)
         self.lexical = None  # Lazy load (only if needed)
         
@@ -69,6 +69,7 @@ class HybridRetriever:
         
         # Lexical results
         if self.lexical is None:
+            from src.retrieval.lexical_retriever import get_lexical_retriever
             self.lexical = get_lexical_retriever(self.mode)
         
         lex_results = self.lexical.retrieve(query, self.cfg['lexical_top_k'])
@@ -112,7 +113,7 @@ class HybridRetriever:
         # Calculate combined scores
         combined = []
         for doc_id, data in score_map.items():
-            doc = data['doc']
+            doc = deepcopy(data['doc'])
             
             # Weighted fusion
             combined_score = (
@@ -134,22 +135,24 @@ class HybridRetriever:
         return combined[:top_k]
     
     def _normalize_scores(self, results: List[Dict]) -> List[Dict]:
-        """Min-max normalize scores to [0, 1]."""
+        """Return score-normalized copies without changing caller-owned results."""
         if not results:
-            return results
-        
-        scores = [r['score'] for r in results]
+            return []
+
+        normalized = [dict(result) for result in results]
+
+        scores = [r['score'] for r in normalized]
         min_score = min(scores)
         max_score = max(scores)
-        
+
         if max_score == min_score:
-            for r in results:
+            for r in normalized:
                 r['score'] = 1.0
         else:
-            for r in results:
+            for r in normalized:
                 r['score'] = (r['score'] - min_score) / (max_score - min_score)
-        
-        return results
+
+        return normalized
     
     def get_stats(self) -> Dict:
         """Get retriever statistics."""

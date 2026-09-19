@@ -3,7 +3,7 @@
 Pydantic models for API requests and responses.
 """
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict
+from typing import Dict, List, Literal, Optional
 
 # ============================================================================
 # REQUEST MODELS
@@ -12,7 +12,7 @@ from typing import List, Optional, Dict
 class QueryRequest(BaseModel):
     """Query request with simple options."""
     query: str = Field(..., description="Search query", min_length=1)
-    mode: Optional[str] = Field(
+    mode: Optional[Literal['standard', 'ultra']] = Field(
         None, 
         description="Retrieval mode: 'standard' (full quality) or 'ultra' (50% smaller)"
     )
